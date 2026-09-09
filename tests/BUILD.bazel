@@ -184,6 +184,18 @@ exec_test(
 
 exec_test(
     native_test,
+    name = "pkgutil_component_expand_full_symlink_chain_test",
+    args = [
+        "-e",
+        "$(location :pkgutil_component_expand_full_action)/Payload/Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/System/Library/Frameworks/Ruby.framework/Headers/ruby/config.h",
+    ],
+    data = [
+        ":pkgutil_component_expand_full_action",
+    ],
+)
+
+exec_test(
+    native_test,
     name = "pkgutil_component_expand_full_strip_6_test",
     src = ":test",
     args = [
