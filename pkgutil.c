@@ -176,34 +176,56 @@ static void recreate_as_directory_symlink(const wchar_t *path,
   free(t);
 }
 
+static void symlink_entry_drop(struct symlink_list *list, size_t i) {
+  free(list->items[i].path);
+  free(list->items[i].target);
+  list->items[i] = list->items[--list->len];
+}
+
 /*
  * cpio carries no symlink type, so libarchive guesses "file" unless the target
  * ends in a separator or dot, and Windows cannot traverse a file symlink into
- * a directory. Retype once targets exist; repeat since links chain.
+ * a directory. Retype once targets exist; repeat since links chain. Entries
+ * drop out as they settle so each pass only revisits unresolved links.
  */
 static void symlink_list_fixup(struct symlink_list *list) {
   int changed;
   do {
     changed = 0;
-    for (size_t i = 0; i < list->len; i++) {
+    size_t i = 0;
+    while (i < list->len) {
       struct symlink_entry *l = &list->items[i];
       wchar_t *link = win_full_path(l->path);
+      DWORD la = GetFileAttributesW(link);
+      if (la == INVALID_FILE_ATTRIBUTES ||
+          !(la & FILE_ATTRIBUTE_REPARSE_POINT) ||
+          (la & FILE_ATTRIBUTE_DIRECTORY)) {
+        free(link);
+        symlink_entry_drop(list, i);
+        continue;
+      }
       wchar_t *rel = symlink_target_path(l);
       wchar_t *target = win_full_path(rel);
-      DWORD la = GetFileAttributesW(link);
       DWORD ta = GetFileAttributesW(target);
-      if (la != INVALID_FILE_ATTRIBUTES &&
-          (la & FILE_ATTRIBUTE_REPARSE_POINT) &&
-          !(la & FILE_ATTRIBUTE_DIRECTORY) &&
-          ta != INVALID_FILE_ATTRIBUTES && (ta & FILE_ATTRIBUTE_DIRECTORY)) {
+      int done = 0;
+      if (ta != INVALID_FILE_ATTRIBUTES && (ta & FILE_ATTRIBUTE_DIRECTORY)) {
         recreate_as_directory_symlink(link, l->target);
         changed = 1;
+        done = 1;
+      } else if (ta != INVALID_FILE_ATTRIBUTES &&
+                 !(ta & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        done = 1;
       }
       free(target);
       free(rel);
       free(link);
+      if (done) {
+        symlink_entry_drop(list, i);
+      } else {
+        i++;
+      }
     }
-  } while (changed);
+  } while (changed && list->len > 0);
 }
 #else
 static void symlink_list_add(struct symlink_list *list,
