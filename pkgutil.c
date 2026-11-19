@@ -15,6 +15,11 @@
 #define mkdir(x, y) _mkdir(x)
 #endif
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#include <wchar.h>
+#include <windows.h>
+#endif
+
 #define BSIZE (8 * 1024)
 
 static const char *short_options = "EfhvX";
@@ -57,6 +62,182 @@ static void fail_errno(const char *ctx) {
   fprintf(stderr, "%s: %s\n", ctx, strerror(errno));
   exit(1);
 }
+
+struct symlink_entry;
+struct symlink_list {
+  struct symlink_entry *items;
+  size_t len;
+  size_t cap;
+};
+
+#if defined(_WIN32) && !defined(__CYGWIN__)
+struct symlink_entry {
+  wchar_t *path;
+  wchar_t *target;
+};
+
+static void fail_win32(const char *ctx) {
+  fprintf(stderr, "%s: windows error %lu\n", ctx,
+          (unsigned long)GetLastError());
+  exit(1);
+}
+
+static void symlink_list_add(struct symlink_list *list,
+                             struct archive_entry *e) {
+  if (archive_entry_filetype(e) != AE_IFLNK) {
+    return;
+  }
+  const wchar_t *path = archive_entry_pathname_w(e);
+  const wchar_t *target = archive_entry_symlink_w(e);
+  if (path == NULL || target == NULL) {
+    return;
+  }
+  if (list->len == list->cap) {
+    size_t new_cap = list->cap == 0 ? 64 : list->cap * 2;
+    struct symlink_entry *new_items =
+        realloc(list->items, new_cap * sizeof(*new_items));
+    if (new_items == NULL) {
+      fail_errno("realloc");
+    }
+    list->items = new_items;
+    list->cap = new_cap;
+  }
+  struct symlink_entry *l = &list->items[list->len++];
+  l->path = _wcsdup(path);
+  l->target = _wcsdup(target);
+  if (l->path == NULL || l->target == NULL) {
+    fail_errno("_wcsdup");
+  }
+}
+
+static void symlink_list_free(struct symlink_list *list) {
+  for (size_t i = 0; i < list->len; i++) {
+    free(list->items[i].path);
+    free(list->items[i].target);
+  }
+  free(list->items);
+  list->items = NULL;
+  list->len = 0;
+  list->cap = 0;
+}
+
+/* The \\?\ prefix lifts MAX_PATH, which nested framework paths exceed. */
+static wchar_t *win_full_path(const wchar_t *path) {
+  DWORD n = GetFullPathNameW(path, 0, NULL, NULL);
+  wchar_t *full = malloc((n + 4) * sizeof(wchar_t));
+  if (full == NULL) {
+    fail_errno("malloc");
+  }
+  wcscpy(full, L"\\\\?\\");
+  if (n == 0 || GetFullPathNameW(path, n, full + 4, NULL) == 0) {
+    fail_win32("GetFullPathNameW");
+  }
+  return (full);
+}
+
+static wchar_t *symlink_target_path(const struct symlink_entry *l) {
+  size_t dirlen = 0;
+  for (const wchar_t *p = l->path; *p != L'\0'; p++) {
+    if (*p == L'/' || *p == L'\\') {
+      dirlen = (size_t)(p - l->path) + 1;
+    }
+  }
+  size_t tlen = wcslen(l->target);
+  wchar_t *buf = malloc((dirlen + tlen + 1) * sizeof(wchar_t));
+  if (buf == NULL) {
+    fail_errno("malloc");
+  }
+  memcpy(buf, l->path, dirlen * sizeof(wchar_t));
+  memcpy(buf + dirlen, l->target, (tlen + 1) * sizeof(wchar_t));
+  return (buf);
+}
+
+static void recreate_as_directory_symlink(const wchar_t *path,
+                                          const wchar_t *target) {
+  wchar_t *t = _wcsdup(target);
+  if (t == NULL) {
+    fail_errno("_wcsdup");
+  }
+  for (wchar_t *p = t; *p != L'\0'; p++) {
+    if (*p == L'/') {
+      *p = L'\\';
+    }
+  }
+  if (!DeleteFileW(path)) {
+    fail_win32("DeleteFileW(symlink)");
+  }
+  DWORD flags = SYMBOLIC_LINK_FLAG_DIRECTORY;
+  if (!CreateSymbolicLinkW(path, t,
+                           flags |
+                               SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) &&
+      !CreateSymbolicLinkW(path, t, flags)) {
+    fail_win32("CreateSymbolicLinkW");
+  }
+  free(t);
+}
+
+static void symlink_entry_drop(struct symlink_list *list, size_t i) {
+  free(list->items[i].path);
+  free(list->items[i].target);
+  list->items[i] = list->items[--list->len];
+}
+
+/*
+ * cpio carries no symlink type, so libarchive guesses "file" unless the target
+ * ends in a separator or dot, and Windows cannot traverse a file symlink into
+ * a directory. Retype once targets exist; repeat since links chain. Entries
+ * drop out as they settle so each pass only revisits unresolved links.
+ */
+static void symlink_list_fixup(struct symlink_list *list) {
+  int changed;
+  do {
+    changed = 0;
+    size_t i = 0;
+    while (i < list->len) {
+      struct symlink_entry *l = &list->items[i];
+      wchar_t *link = win_full_path(l->path);
+      DWORD la = GetFileAttributesW(link);
+      if (la == INVALID_FILE_ATTRIBUTES ||
+          !(la & FILE_ATTRIBUTE_REPARSE_POINT) ||
+          (la & FILE_ATTRIBUTE_DIRECTORY)) {
+        free(link);
+        symlink_entry_drop(list, i);
+        continue;
+      }
+      wchar_t *rel = symlink_target_path(l);
+      wchar_t *target = win_full_path(rel);
+      DWORD ta = GetFileAttributesW(target);
+      int done = 0;
+      if (ta != INVALID_FILE_ATTRIBUTES && (ta & FILE_ATTRIBUTE_DIRECTORY)) {
+        recreate_as_directory_symlink(link, l->target);
+        changed = 1;
+        done = 1;
+      } else if (ta != INVALID_FILE_ATTRIBUTES &&
+                 !(ta & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        done = 1;
+      }
+      free(target);
+      free(rel);
+      free(link);
+      if (done) {
+        symlink_entry_drop(list, i);
+      } else {
+        i++;
+      }
+    }
+  } while (changed && list->len > 0);
+}
+#else
+static void symlink_list_add(struct symlink_list *list,
+                             struct archive_entry *e) {
+  (void)list;
+  (void)e;
+}
+
+static void symlink_list_free(struct symlink_list *list) { (void)list; }
+
+static void symlink_list_fixup(struct symlink_list *list) { (void)list; }
+#endif
 
 static void usage(FILE *out) {
   fprintf(out,
@@ -279,6 +460,7 @@ static void extract_nested_archive_from_stream(struct astream *in,
   struct archive_entry *e;
   int r;
   char *cwd = NULL;
+  struct symlink_list links = {NULL, 0, 0};
 
   if (a == NULL || disk == NULL) {
     fail_errno("archive allocation");
@@ -331,6 +513,7 @@ static void extract_nested_archive_from_stream(struct astream *in,
       continue;
     }
 
+    symlink_list_add(&links, e);
     r = archive_read_extract2(a, e, disk);
     if (r != ARCHIVE_OK) {
       free(rel);
@@ -339,6 +522,8 @@ static void extract_nested_archive_from_stream(struct astream *in,
     free(rel);
   }
 
+  symlink_list_fixup(&links);
+  symlink_list_free(&links);
   archive_write_free(disk);
   archive_read_free(a);
 
@@ -640,6 +825,7 @@ int main(int argc, char **argv) {
   int do_expand_full = 0;
   int strip_components = 0;
   int flags;
+  struct symlink_list links = {NULL, 0, 0};
 
   matching = archive_match_new();
   if (matching == NULL) {
@@ -812,6 +998,7 @@ int main(int argc, char **argv) {
         free(rel);
         continue;
       }
+      symlink_list_add(&links, e);
       r = archive_read_extract2(xar, e, disk);
       if (r != ARCHIVE_OK) {
         free(rel);
@@ -821,6 +1008,8 @@ int main(int argc, char **argv) {
     }
   }
 
+  symlink_list_fixup(&links);
+  symlink_list_free(&links);
   archive_write_free(disk);
   archive_read_free(xar);
   archive_match_free(matching);
