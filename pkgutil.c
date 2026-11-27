@@ -23,6 +23,12 @@
 #define PKGUTIL_WINDOWS_SYMLINK_FALLBACK 0
 #endif
 
+#ifdef ARCHIVE_EXTRACT_WINDOWS_SYMLINK_TYPE
+#define PKGUTIL_WINDOWS_SYMLINK_TYPE ARCHIVE_EXTRACT_WINDOWS_SYMLINK_TYPE
+#else
+#define PKGUTIL_WINDOWS_SYMLINK_TYPE 0
+#endif
+
 static const char *short_options = "EfhvX";
 
 static const char *const nested_archive_names[] = {"Payload", "Scripts", NULL};
@@ -31,7 +37,8 @@ static const int disk_flags =
     ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM | ARCHIVE_EXTRACT_ACL |
     ARCHIVE_EXTRACT_XATTR | ARCHIVE_EXTRACT_FFLAGS | ARCHIVE_EXTRACT_OWNER |
     ARCHIVE_EXTRACT_SECURE_SYMLINKS | ARCHIVE_EXTRACT_SECURE_NODOTDOT |
-    ARCHIVE_EXTRACT_SECURE_NOABSOLUTEPATHS | PKGUTIL_WINDOWS_SYMLINK_FALLBACK;
+    ARCHIVE_EXTRACT_SECURE_NOABSOLUTEPATHS | PKGUTIL_WINDOWS_SYMLINK_FALLBACK |
+    PKGUTIL_WINDOWS_SYMLINK_TYPE;
 
 enum {
   opt_include = 256,
@@ -345,6 +352,9 @@ static void extract_nested_archive_from_stream(struct astream *in,
     free(rel);
   }
 
+  if (archive_write_close(disk) != ARCHIVE_OK) {
+    fail_archive(disk, "finish nested extraction");
+  }
   archive_write_free(disk);
   archive_read_free(a);
 
@@ -827,6 +837,9 @@ int main(int argc, char **argv) {
     }
   }
 
+  if (archive_write_close(disk) != ARCHIVE_OK) {
+    fail_archive(disk, "finish extraction");
+  }
   archive_write_free(disk);
   archive_read_free(xar);
   archive_match_free(matching);
