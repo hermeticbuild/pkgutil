@@ -1,7 +1,18 @@
 load("@bazel_lib//lib:run_binary.bzl", "run_binary")
 load("@bazel_skylib//rules:native_binary.bzl", "native_test")
+load("@rules_cc//cc:defs.bzl", "cc_test")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
 load(":exec_test.bzl", "exec_test")
+
+cc_test(
+    name = "windows_symlink_test",
+    srcs = ["windows_symlink_test.c"],
+    linkopts = select({
+        "//:is_windows_clang_mingw": ["-lbcrypt"],
+        "//conditions:default": [],
+    }),
+    deps = ["@libarchive//libarchive"],
+)
 
 zig_binary(
     name = "test",

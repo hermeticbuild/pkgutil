@@ -1,0 +1,39 @@
+name: Windows symlinks
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bazelisk
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
+
+      - name: Enable unprivileged symbolic links
+        shell: pwsh
+        run: |
+          $key = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock"
+          New-Item -Path $key -Force | Out-Null
+          New-ItemProperty -Path $key -Name AllowDevelopmentWithoutDevLicense -Value 1 -PropertyType DWord -Force | Out-Null
+
+      - name: Test deferred symbolic links
+        shell: bash
+        run: |
+          bazel test --test_output=errors \
+            --bes_backend= --bes_results_url= \
+            --remote_cache= --remote_executor= \
+            --@libarchive//:use_mbedtls=true \
+            //tests:windows_symlink_test
