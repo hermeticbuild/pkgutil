@@ -31,6 +31,8 @@ jobs:
 
       - name: Test deferred symbolic links
         shell: bash
+        env:
+          MSYS2_ARG_CONV_EXCL: "*"
         run: |
           bazel test --test_output=errors \
             --bes_backend= --bes_results_url= \
